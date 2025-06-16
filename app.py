@@ -7,94 +7,66 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-from datetime import datetime
 import os
 import requests
-from dotenv import load_dotenv
+from datetime import datetime
+from geopy.geocoders import Nominatim
 
-# 載入 .env 環境變數
-load_dotenv()
-
-# 初始化
 app = Flask(__name__)
+
 configuration = Configuration(access_token=os.getenv('CHANNEL_ACCESS_TOKEN'))
 line_handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
-
 
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
-
     try:
         line_handler.handle(body, signature)
     except InvalidSignatureError:
-        app.logger.info("Invalid signature. Check access token/channel secret.")
+        app.logger.info("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
-
     return 'OK'
-
 
 @line_handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text.strip()
-
-    if user_text.startswith("天氣 "):
-        parts = user_text[3:].split()
-        city = parts[0]
-        date_str = None
-
-        if len(parts) > 1:
-            try:
-                mm, dd = parts[1].split("/")
-                year = datetime.now().year
-                date_str = f"{year}-{int(mm):02d}-{int(dd):02d}"
-            except:
-                reply_text = "請輸入正確格式，例如：天氣 台北 6/15"
-                send_reply(event.reply_token, reply_text)
-                return
-
-        reply_text = get_weather_forecast(city, date_str)
-    elif user_text.lower() == "hi":
-        reply_text = "hello"
-    else:
-        reply_text = "你說的是：" + user_text
-
-    send_reply(event.reply_token, reply_text)
-
-
-def send_reply(token, message):
+    reply_text = get_weather_forecast(user_text)
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
-                reply_token=token,
-                messages=[TextMessage(text=message)]
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
             )
         )
 
-
 def get_weather_forecast(city, target_date=None):
-    url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=zh_tw"
     try:
+        geolocator = Nominatim(user_agent="line_weather_bot")
+        location = geolocator.geocode(city + ", Taiwan")
+        if not location:
+            return f"找不到 {city} 的位置。請再確認地名。"
+
+        lat, lon = location.latitude, location.longitude
+        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=zh_tw"
         response = requests.get(url)
         data = response.json()
 
         if response.status_code != 200:
-            return f"查不到「{city}」的天氣資料，請確認地名拼寫。"
+            return f"{city} 的天氣查詢失敗：{data.get('message', '未知錯誤')}"
 
         forecast_list = data["list"]
         if not target_date:
             target_date = datetime.now().strftime("%Y-%m-%d")
 
         matched = [f for f in forecast_list if f["dt_txt"].startswith(target_date)]
-
         if not matched:
             return f"{city} 在 {target_date} 查無天氣資料（僅提供未來5天）"
 
-        result = f"{city} {target_date} 的天氣預報：\n"
+        result = f"{location.address}\n{target_date} 天氣預報：\n"
         for f in matched:
             time_str = f["dt_txt"][11:16]
             temp = f["main"]["temp"]
@@ -104,8 +76,7 @@ def get_weather_forecast(city, target_date=None):
 
         return result.strip()
     except Exception as e:
-        return "天氣查詢失敗，請稍後再試。"
-
+        return "天氣查詢時發生錯誤，請稍後再試。"
 
 if __name__ == "__main__":
     app.run()
